@@ -1,0 +1,25 @@
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Файлы миниатюр
+Icon?
+._*
+Thumbs.db
+ehthumbs.db
+Thumbs.db:encryptable
+
+# Временные файлы Mac
+.Spotlight-V100
+.Trashes
+
+# Настройки среды разработки и редакторов
+.idea/
+.vscode/
+*.swp
+*.swo
+*.suo
+*.ntvs*
+*.njsproj
+*.pyproj
+*.local
