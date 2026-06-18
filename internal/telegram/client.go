@@ -16,6 +16,7 @@ import (
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"rsc.io/qr"
 )
 
@@ -137,7 +138,17 @@ func (c *Client) RunQR(ctx context.Context, fn func(ctx context.Context, client 
 		})
 
 		if err != nil {
-			return err
+			if !tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
+				return err
+			}
+
+			password, passwordErr := newConsoleAuth("").Password(ctx)
+			if passwordErr != nil {
+				return passwordErr
+			}
+			if _, passwordErr := c.tg.Auth().Password(ctx, password); passwordErr != nil {
+				return passwordErr
+			}
 		}
 
 		return fn(ctx, c)
@@ -242,22 +253,61 @@ func (c *Client) dialogs(ctx context.Context, limit int) ([]Dialog, error) {
 		limit = 100
 	}
 
-	request := &tg.MessagesGetDialogsRequest{
-		OffsetPeer: &tg.InputPeerEmpty{},
-		Limit:      limit,
-	}
+	const batchSize = 100
 
-	result, err := c.tg.API().MessagesGetDialogs(ctx, request)
-	if err != nil {
-		return nil, err
-	}
+	dialogs := make([]Dialog, 0, limit)
+	offset := dialogOffset{peer: &tg.InputPeerEmpty{}}
+	for len(dialogs) < limit {
+		currentLimit := batchSize
+		if remaining := limit - len(dialogs); remaining < currentLimit {
+			currentLimit = remaining
+		}
 
-	dialogs, err := parseDialogs(result)
-	if err != nil {
-		return nil, err
+		result, err := c.tg.API().MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+			OffsetPeer: offset.peer,
+			OffsetID:   offset.id,
+			OffsetDate: offset.date,
+			Limit:      currentLimit,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		page, err := parseDialogsPage(result)
+		if err != nil {
+			return nil, err
+		}
+		if len(page.dialogs) == 0 {
+			break
+		}
+
+		dialogs = append(dialogs, page.dialogs...)
+		if page.last || page.next.peer == nil || offset.same(page.next) {
+			break
+		}
+		offset = page.next
 	}
 
 	return dialogs, nil
+}
+
+type dialogOffset struct {
+	peer tg.InputPeerClass
+	id   int
+	date int
+}
+
+func (o dialogOffset) same(next dialogOffset) bool {
+	if o.id != next.id || o.date != next.date {
+		return false
+	}
+	return inputPeerKey(o.peer) == inputPeerKey(next.peer)
+}
+
+type dialogsPage struct {
+	dialogs []Dialog
+	next    dialogOffset
+	last    bool
 }
 
 type dialogFilterMatcher struct {
@@ -344,6 +394,19 @@ func dialogKey(dialog Dialog) string {
 		return fmt.Sprintf("channel:%d", dialog.ID)
 	default:
 		return fmt.Sprintf("%s:%d", dialog.Type, dialog.ID)
+	}
+}
+
+func peerKey(peer tg.PeerClass) string {
+	switch p := peer.(type) {
+	case *tg.PeerUser:
+		return fmt.Sprintf("user:%d", p.UserID)
+	case *tg.PeerChat:
+		return fmt.Sprintf("group:%d", p.ChatID)
+	case *tg.PeerChannel:
+		return fmt.Sprintf("channel:%d", p.ChannelID)
+	default:
+		return ""
 	}
 }
 
@@ -462,6 +525,7 @@ type dialogsResponse interface {
 	GetDialogs() []tg.DialogClass
 	GetChats() []tg.ChatClass
 	GetUsers() []tg.UserClass
+	GetMessages() []tg.MessageClass
 }
 
 type messagesResponse interface {
@@ -469,15 +533,26 @@ type messagesResponse interface {
 }
 
 func parseDialogs(result tg.MessagesDialogsClass) ([]Dialog, error) {
+	page, err := parseDialogsPage(result)
+	if err != nil {
+		return nil, err
+	}
+
+	return page.dialogs, nil
+}
+
+func parseDialogsPage(result tg.MessagesDialogsClass) (dialogsPage, error) {
 	response, ok := result.(dialogsResponse)
 	if !ok {
-		return nil, fmt.Errorf("unexpected dialogs response type %T", result)
+		return dialogsPage{}, fmt.Errorf("unexpected dialogs response type %T", result)
 	}
 
 	users := indexUsers(response.GetUsers())
 	chats := indexChats(response.GetChats())
+	offsets := indexMessageOffsets(response.GetMessages())
 
 	dialogs := make([]Dialog, 0, len(response.GetDialogs()))
+	var next dialogOffset
 	for _, item := range response.GetDialogs() {
 		dialog, ok := item.(*tg.Dialog)
 		if !ok {
@@ -490,9 +565,69 @@ func parseDialogs(result tg.MessagesDialogsClass) ([]Dialog, error) {
 			parsed.FolderID = folderID
 		}
 		dialogs = append(dialogs, parsed)
+
+		if offset, ok := offsetForDialog(dialog, parsed, offsets); ok {
+			next = offset
+		}
 	}
 
-	return dialogs, nil
+	return dialogsPage{
+		dialogs: dialogs,
+		next:    next,
+		last:    isLastDialogsPage(result),
+	}, nil
+}
+
+type messageOffset struct {
+	id   int
+	date int
+}
+
+func indexMessageOffsets(messages []tg.MessageClass) map[string]messageOffset {
+	offsets := make(map[string]messageOffset, len(messages))
+	for _, item := range messages {
+		message, ok := item.AsNotEmpty()
+		if !ok {
+			continue
+		}
+		offsets[peerKey(message.GetPeerID())] = messageOffset{
+			id:   message.GetID(),
+			date: message.GetDate(),
+		}
+	}
+
+	return offsets
+}
+
+func offsetForDialog(dialog *tg.Dialog, parsed Dialog, offsets map[string]messageOffset) (dialogOffset, bool) {
+	inputPeer, err := (PeerRef{
+		ID:         parsed.ID,
+		Type:       parsed.Type,
+		AccessHash: parsed.AccessHash,
+	}).InputPeer()
+	if err != nil {
+		return dialogOffset{}, false
+	}
+
+	offset, ok := offsets[peerKey(dialog.Peer)]
+	if !ok {
+		offset = messageOffset{id: dialog.TopMessage}
+	}
+
+	return dialogOffset{
+		peer: inputPeer,
+		id:   offset.id,
+		date: offset.date,
+	}, true
+}
+
+func isLastDialogsPage(result tg.MessagesDialogsClass) bool {
+	switch result.(type) {
+	case *tg.MessagesDialogs:
+		return true
+	default:
+		return false
+	}
 }
 
 func indexUsers(users []tg.UserClass) map[int64]*tg.User {

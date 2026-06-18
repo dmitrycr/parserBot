@@ -515,7 +515,7 @@ func (b *Bot) handleFolderCallback(ctx context.Context, chatID int64, data strin
 		return b.api.sendMessage(ctx, chatID, "Некорректный ID папки.", nil)
 	}
 
-	count, err := b.app.SyncChatsInFolder(ctx, folderID, 1000)
+	count, err := b.app.SyncChatsInFolder(ctx, folderID, 5000)
 	if err != nil {
 		return err
 	}
