@@ -54,6 +54,27 @@ func (s Service) SyncChats(ctx context.Context, limit int) (int, error) {
 		return 0, err
 	}
 
+	return s.saveDialogs(ctx, dialogs)
+}
+
+func (s Service) SyncChatsInFolder(ctx context.Context, folderID int, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	dialogs, err := s.tg.DialogsInFolder(ctx, folderID, limit)
+	if err != nil {
+		return 0, err
+	}
+
+	return s.saveDialogs(ctx, dialogs)
+}
+
+func (s Service) Folders(ctx context.Context) ([]telegram.DialogFolder, error) {
+	return s.tg.DialogFolders(ctx)
+}
+
+func (s Service) saveDialogs(ctx context.Context, dialogs []telegram.Dialog) (int, error) {
 	existing, _ := s.files.LoadChats(ctx)
 	enabled := map[string]bool{}
 	for _, chat := range existing {

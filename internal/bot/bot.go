@@ -155,6 +155,8 @@ func (b *Bot) handleMessage(ctx context.Context, message Message) error {
 		return b.sendAutoStatus(ctx, message.Chat.ID)
 	case "/sync_chats":
 		return b.syncChats(ctx, message.Chat.ID)
+	case "/folders":
+		return b.sendFoldersMenu(ctx, message.Chat.ID)
 	case "/requests":
 		if !storage.IsAdmin(user) {
 			return b.api.sendMessage(ctx, message.Chat.ID, "Недостаточно прав.", nil)
@@ -271,6 +273,12 @@ func (b *Bot) handleCallback(ctx context.Context, query CallbackQuery) error {
 		}
 		return b.handleKeywordCallback(ctx, query.Message.Chat.ID, query.From.ID, strings.TrimPrefix(query.Data, "kw:"))
 	}
+	if strings.HasPrefix(query.Data, "folder:") {
+		if query.Message == nil {
+			return nil
+		}
+		return b.handleFolderCallback(ctx, query.Message.Chat.ID, strings.TrimPrefix(query.Data, "folder:"))
+	}
 
 	if !storage.IsAdmin(user) {
 		return b.api.answerCallbackQuery(ctx, query.ID, "Недостаточно прав")
@@ -321,6 +329,7 @@ func (b *Bot) sendHelp(ctx context.Context, chatID int64, admin bool) error {
 		"/stop_parser - выключить автопарсинг",
 		"/auto_status - статус автопарсинга",
 		"/sync_chats - обновить список чатов",
+		"/folders - выбрать папку Telegram для синхронизации",
 	}, "\n")
 	if admin {
 		text += "\n\nadmin:\n" + strings.Join([]string{
@@ -350,6 +359,9 @@ func (b *Bot) sendMainMenu(ctx context.Context, chatID int64, admin bool) error 
 		{
 			{Text: "🔎 Ключевые", CallbackData: "menu:keywords"},
 			{Text: "▶️ Парсинг", CallbackData: "menu:parse"},
+		},
+		{
+			{Text: "📁 Папки", CallbackData: "menu:folders"},
 		},
 	}
 	if admin {
@@ -412,6 +424,8 @@ func (b *Bot) handleMenuCallback(ctx context.Context, chatID int64, userID int64
 		return b.sendUsers(ctx, chatID, "")
 	case "sync":
 		return b.syncChats(ctx, chatID)
+	case "folders":
+		return b.sendFoldersMenu(ctx, chatID)
 	default:
 		return b.sendMainMenu(ctx, chatID, admin)
 	}
@@ -431,6 +445,8 @@ func (b *Bot) handleReplyMenuButton(ctx context.Context, chatID int64, user stor
 		return true, b.sendParseMenu(ctx, chatID)
 	case replySyncButton:
 		return true, b.syncChats(ctx, chatID)
+	case replyFoldersButton:
+		return true, b.sendFoldersMenu(ctx, chatID)
 	case replyAccessButton:
 		if !storage.IsAdmin(user) {
 			return true, b.api.sendMessage(ctx, chatID, "Недостаточно прав.", nil)
@@ -453,6 +469,58 @@ func (b *Bot) hideReplyMenu(ctx context.Context, chatID int64) error {
 	}
 
 	return b.api.sendMessage(ctx, chatID, "Чтобы вернуть меню, нажмите кнопку ниже.", openReplyMenuNav())
+}
+
+func (b *Bot) sendFoldersMenu(ctx context.Context, chatID int64) error {
+	folders, err := b.app.Folders(ctx)
+	if err != nil {
+		return err
+	}
+
+	rows := [][]InlineKeyboardButton{
+		{
+			{Text: "🌐 Все чаты", CallbackData: "folder:all"},
+		},
+	}
+	for _, folder := range folders {
+		rows = append(rows, []InlineKeyboardButton{
+			{
+				Text:         truncate(fmt.Sprintf("📁 %s (ID %d)", folder.Title, folder.ID), 55),
+				CallbackData: fmt.Sprintf("folder:sync:%d", folder.ID),
+			},
+		})
+	}
+	rows = append(rows, navRows()...)
+
+	text := "📁 Папки Telegram\n\nВыберите папку, из которой нужно добавить чаты."
+	if len(folders) == 0 {
+		text += "\n\nПапки не найдены. Можно синхронизировать все чаты."
+	}
+
+	return b.api.sendMessage(ctx, chatID, text, &InlineKeyboardMarkup{InlineKeyboard: rows})
+}
+
+func (b *Bot) handleFolderCallback(ctx context.Context, chatID int64, data string) error {
+	if data == "all" {
+		return b.syncChats(ctx, chatID)
+	}
+
+	parts := strings.Split(data, ":")
+	if len(parts) != 2 || parts[0] != "sync" {
+		return b.api.sendMessage(ctx, chatID, "Неизвестное действие с папкой.", nil)
+	}
+
+	folderID, err := strconv.Atoi(parts[1])
+	if err != nil || folderID <= 0 {
+		return b.api.sendMessage(ctx, chatID, "Некорректный ID папки.", nil)
+	}
+
+	count, err := b.app.SyncChatsInFolder(ctx, folderID, 1000)
+	if err != nil {
+		return err
+	}
+
+	return b.api.sendMessage(ctx, chatID, fmt.Sprintf("Синхронизировано чатов из папки ID %d: %d", folderID, count), mainNav())
 }
 
 func (b *Bot) sendChatsMenu(ctx context.Context, chatID int64) error {
@@ -1213,6 +1281,7 @@ const (
 	replyKeywordsButton = "🔎 Ключевые"
 	replyParseButton    = "▶️ Парсинг"
 	replySyncButton     = "🔄 Синхронизация"
+	replyFoldersButton  = "📁 Папки"
 	replyAccessButton   = "👥 Доступ"
 	replyHideButton     = "❌ Скрыть меню"
 )
@@ -1230,6 +1299,9 @@ func mainReplyKeyboard(admin bool) *ReplyKeyboardMarkup {
 		{
 			{Text: replyParseButton},
 			{Text: replySyncButton},
+		},
+		{
+			{Text: replyFoldersButton},
 		},
 	}
 	if admin {

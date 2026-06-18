@@ -7,6 +7,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -33,6 +34,12 @@ type Dialog struct {
 	Title      string
 	Username   string
 	Unread     int
+	FolderID   int
+}
+
+type DialogFolder struct {
+	ID    int
+	Title string
 }
 
 type PeerRef struct {
@@ -142,14 +149,105 @@ func (c *Client) API() *tg.Client {
 }
 
 func (c *Client) Dialogs(ctx context.Context, limit int) ([]Dialog, error) {
+	return c.dialogs(ctx, limit)
+}
+
+func (c *Client) DialogsInFolder(ctx context.Context, folderID int, limit int) ([]Dialog, error) {
+	if folderID <= 0 {
+		return nil, fmt.Errorf("invalid folder id: %d", folderID)
+	}
+
+	filter, err := c.dialogFilter(ctx, folderID)
+	if err != nil {
+		return nil, err
+	}
+
+	dialogs, err := c.dialogs(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make([]Dialog, 0, len(dialogs))
+	for _, dialog := range dialogs {
+		if filter.Match(dialog) {
+			filtered = append(filtered, dialog)
+		}
+	}
+
+	return filtered, nil
+}
+
+func (c *Client) DialogFolders(ctx context.Context) ([]DialogFolder, error) {
+	result, err := c.tg.API().MessagesGetDialogFilters(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	folders := make([]DialogFolder, 0, len(result.Filters))
+	for _, item := range result.Filters {
+		switch folder := item.(type) {
+		case *tg.DialogFilter:
+			folders = append(folders, dialogFolder(folder.ID, folder.Title.Text))
+		case *tg.DialogFilterChatlist:
+			folders = append(folders, dialogFolder(folder.ID, folder.Title.Text))
+		}
+	}
+	sort.Slice(folders, func(i, j int) bool {
+		return folders[i].ID < folders[j].ID
+	})
+
+	return folders, nil
+}
+
+func (c *Client) dialogFilter(ctx context.Context, folderID int) (dialogFilterMatcher, error) {
+	result, err := c.tg.API().MessagesGetDialogFilters(ctx)
+	if err != nil {
+		return dialogFilterMatcher{}, err
+	}
+
+	for _, item := range result.Filters {
+		switch folder := item.(type) {
+		case *tg.DialogFilter:
+			if folder.ID == folderID {
+				return newDialogFilterMatcher(
+					folderID,
+					folder.Groups,
+					folder.Broadcasts,
+					folder.Bots,
+					folder.PinnedPeers,
+					folder.IncludePeers,
+					folder.ExcludePeers,
+				), nil
+			}
+		case *tg.DialogFilterChatlist:
+			if folder.ID == folderID {
+				return newDialogFilterMatcher(
+					folderID,
+					false,
+					false,
+					false,
+					folder.PinnedPeers,
+					folder.IncludePeers,
+					nil,
+				), nil
+			}
+		}
+	}
+
+	return dialogFilterMatcher{}, fmt.Errorf("folder not found: %d", folderID)
+}
+
+func (c *Client) dialogs(ctx context.Context, limit int) ([]Dialog, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 
-	result, err := c.tg.API().MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+	request := &tg.MessagesGetDialogsRequest{
 		OffsetPeer: &tg.InputPeerEmpty{},
 		Limit:      limit,
-	})
+	}
+
+	result, err := c.tg.API().MessagesGetDialogs(ctx, request)
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +258,104 @@ func (c *Client) Dialogs(ctx context.Context, limit int) ([]Dialog, error) {
 	}
 
 	return dialogs, nil
+}
+
+type dialogFilterMatcher struct {
+	folderID   int
+	groups     bool
+	broadcasts bool
+	bots       bool
+	include    map[string]struct{}
+	exclude    map[string]struct{}
+}
+
+func newDialogFilterMatcher(folderID int, groups bool, broadcasts bool, bots bool, pinned []tg.InputPeerClass, include []tg.InputPeerClass, exclude []tg.InputPeerClass) dialogFilterMatcher {
+	matcher := dialogFilterMatcher{
+		folderID:   folderID,
+		groups:     groups,
+		broadcasts: broadcasts,
+		bots:       bots,
+		include:    map[string]struct{}{},
+		exclude:    map[string]struct{}{},
+	}
+	for _, peer := range pinned {
+		if key := inputPeerKey(peer); key != "" {
+			matcher.include[key] = struct{}{}
+		}
+	}
+	for _, peer := range include {
+		if key := inputPeerKey(peer); key != "" {
+			matcher.include[key] = struct{}{}
+		}
+	}
+	for _, peer := range exclude {
+		if key := inputPeerKey(peer); key != "" {
+			matcher.exclude[key] = struct{}{}
+		}
+	}
+
+	return matcher
+}
+
+func (m dialogFilterMatcher) Match(dialog Dialog) bool {
+	key := dialogKey(dialog)
+	if _, ok := m.exclude[key]; ok {
+		return false
+	}
+	if _, ok := m.include[key]; ok {
+		return true
+	}
+	if dialog.FolderID == m.folderID {
+		return true
+	}
+	if m.groups && (dialog.Type == "group" || dialog.Type == "supergroup") {
+		return true
+	}
+	if m.broadcasts && dialog.Type == "channel" {
+		return true
+	}
+	if m.bots && dialog.Type == "bot" {
+		return true
+	}
+
+	return false
+}
+
+func inputPeerKey(peer tg.InputPeerClass) string {
+	switch p := peer.(type) {
+	case *tg.InputPeerUser:
+		return fmt.Sprintf("user:%d", p.UserID)
+	case *tg.InputPeerChat:
+		return fmt.Sprintf("group:%d", p.ChatID)
+	case *tg.InputPeerChannel:
+		return fmt.Sprintf("channel:%d", p.ChannelID)
+	default:
+		return ""
+	}
+}
+
+func dialogKey(dialog Dialog) string {
+	switch dialog.Type {
+	case "user", "bot":
+		return fmt.Sprintf("user:%d", dialog.ID)
+	case "group":
+		return fmt.Sprintf("group:%d", dialog.ID)
+	case "channel", "supergroup":
+		return fmt.Sprintf("channel:%d", dialog.ID)
+	default:
+		return fmt.Sprintf("%s:%d", dialog.Type, dialog.ID)
+	}
+}
+
+func dialogFolder(id int, title string) DialogFolder {
+	if title == "" {
+		title = fmt.Sprintf("Папка %d", id)
+	}
+
+	return DialogFolder{
+		ID:    id,
+		Title: title,
+	}
 }
 
 func (c *Client) History(ctx context.Context, peer PeerRef, limit int) ([]Message, error) {
@@ -290,6 +486,9 @@ func parseDialogs(result tg.MessagesDialogsClass) ([]Dialog, error) {
 
 		parsed := dialogFromPeer(dialog.Peer, users, chats)
 		parsed.Unread = dialog.UnreadCount
+		if folderID, ok := dialog.GetFolderID(); ok {
+			parsed.FolderID = folderID
+		}
 		dialogs = append(dialogs, parsed)
 	}
 
