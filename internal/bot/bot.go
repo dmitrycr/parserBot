@@ -118,6 +118,9 @@ func (b *Bot) handleMessage(ctx context.Context, message Message) error {
 	if text == "" {
 		return b.sendMainMenu(ctx, message.Chat.ID, storage.IsAdmin(user))
 	}
+	if handled, err := b.handleReplyMenuButton(ctx, message.Chat.ID, user, text); handled || err != nil {
+		return err
+	}
 	if !strings.HasPrefix(text, "/") {
 		if handled, err := b.handleStateMessage(ctx, message.Chat.ID, message.From.ID, text); handled || err != nil {
 			return err
@@ -335,6 +338,10 @@ func (b *Bot) sendHelp(ctx context.Context, chatID int64, admin bool) error {
 }
 
 func (b *Bot) sendMainMenu(ctx context.Context, chatID int64, admin bool) error {
+	if err := b.sendReplyMenu(ctx, chatID, admin); err != nil {
+		return err
+	}
+
 	rows := [][]InlineKeyboardButton{
 		{
 			{Text: "📊 Статус", CallbackData: "menu:status"},
@@ -362,6 +369,8 @@ func (b *Bot) sendMainMenu(ctx context.Context, chatID int64, admin bool) error 
 func (b *Bot) handleMenuCallback(ctx context.Context, chatID int64, userID int64, section string, admin bool) error {
 	switch section {
 	case "home":
+		return b.sendMainMenu(ctx, chatID, admin)
+	case "show_reply_menu":
 		return b.sendMainMenu(ctx, chatID, admin)
 	case "status":
 		return b.sendStatus(ctx, chatID)
@@ -401,6 +410,44 @@ func (b *Bot) handleMenuCallback(ctx context.Context, chatID int64, userID int64
 	default:
 		return b.sendMainMenu(ctx, chatID, admin)
 	}
+}
+
+func (b *Bot) handleReplyMenuButton(ctx context.Context, chatID int64, user storage.User, text string) (bool, error) {
+	switch strings.TrimSpace(text) {
+	case replyStartButton:
+		return true, b.sendMainMenu(ctx, chatID, storage.IsAdmin(user))
+	case replyStatusButton:
+		return true, b.sendStatus(ctx, chatID)
+	case replyChatsButton:
+		return true, b.sendChatsMenu(ctx, chatID)
+	case replyKeywordsButton:
+		return true, b.sendKeywordsMenu(ctx, chatID)
+	case replyParseButton:
+		return true, b.sendParseMenu(ctx, chatID)
+	case replySyncButton:
+		return true, b.syncChats(ctx, chatID)
+	case replyAccessButton:
+		if !storage.IsAdmin(user) {
+			return true, b.api.sendMessage(ctx, chatID, "Недостаточно прав.", nil)
+		}
+		return true, b.sendAccessMenu(ctx, chatID)
+	case replyHideButton:
+		return true, b.hideReplyMenu(ctx, chatID)
+	default:
+		return false, nil
+	}
+}
+
+func (b *Bot) sendReplyMenu(ctx context.Context, chatID int64, admin bool) error {
+	return b.api.sendMessage(ctx, chatID, "Меню открыто.", mainReplyKeyboard(admin))
+}
+
+func (b *Bot) hideReplyMenu(ctx context.Context, chatID int64) error {
+	if err := b.api.sendMessage(ctx, chatID, "Меню скрыто.", &ReplyKeyboardRemove{RemoveKeyboard: true}); err != nil {
+		return err
+	}
+
+	return b.api.sendMessage(ctx, chatID, "Чтобы вернуть меню, нажмите кнопку ниже.", openReplyMenuNav())
 }
 
 func (b *Bot) sendChatsMenu(ctx context.Context, chatID int64) error {
@@ -1131,6 +1178,16 @@ func cancelNav() *InlineKeyboardMarkup {
 	}
 }
 
+func openReplyMenuNav() *InlineKeyboardMarkup {
+	return &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{
+				{Text: "📋 Открыть меню", CallbackData: "menu:show_reply_menu"},
+			},
+		},
+	}
+}
+
 func navRows() [][]InlineKeyboardButton {
 	return [][]InlineKeyboardButton{
 		{
@@ -1141,6 +1198,51 @@ func navRows() [][]InlineKeyboardButton {
 			{Text: "🔎 Ключевые", CallbackData: "menu:keywords"},
 			{Text: "▶️ Парсинг", CallbackData: "menu:parse"},
 		},
+	}
+}
+
+const (
+	replyStartButton    = "▶️ Старт"
+	replyStatusButton   = "📊 Статус"
+	replyChatsButton    = "💬 Чаты"
+	replyKeywordsButton = "🔎 Ключевые"
+	replyParseButton    = "▶️ Парсинг"
+	replySyncButton     = "🔄 Синхронизация"
+	replyAccessButton   = "👥 Доступ"
+	replyHideButton     = "❌ Скрыть меню"
+)
+
+func mainReplyKeyboard(admin bool) *ReplyKeyboardMarkup {
+	rows := [][]KeyboardButton{
+		{
+			{Text: replyStartButton},
+			{Text: replyStatusButton},
+		},
+		{
+			{Text: replyChatsButton},
+			{Text: replyKeywordsButton},
+		},
+		{
+			{Text: replyParseButton},
+			{Text: replySyncButton},
+		},
+	}
+	if admin {
+		rows = append(rows, []KeyboardButton{
+			{Text: replyAccessButton},
+			{Text: replyHideButton},
+		})
+	} else {
+		rows = append(rows, []KeyboardButton{
+			{Text: replyHideButton},
+		})
+	}
+
+	return &ReplyKeyboardMarkup{
+		Keyboard:              rows,
+		ResizeKeyboard:        true,
+		IsPersistent:          true,
+		InputFieldPlaceholder: "Выберите раздел",
 	}
 }
 
@@ -1174,7 +1276,7 @@ func (c *apiClient) getUpdates(ctx context.Context, offset int, timeout int) ([]
 	return response.Result, nil
 }
 
-func (c *apiClient) sendMessage(ctx context.Context, chatID int64, text string, markup *InlineKeyboardMarkup) error {
+func (c *apiClient) sendMessage(ctx context.Context, chatID int64, text string, markup any) error {
 	request := SendMessageRequest{
 		ChatID: chatID,
 		Text:   truncate(text, 3900),
@@ -1297,9 +1399,9 @@ type Chat struct {
 }
 
 type SendMessageRequest struct {
-	ChatID      int64                 `json:"chat_id"`
-	Text        string                `json:"text"`
-	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+	ChatID      int64  `json:"chat_id"`
+	Text        string `json:"text"`
+	ReplyMarkup any    `json:"reply_markup,omitempty"`
 }
 
 type AnswerCallbackQueryRequest struct {
@@ -1314,4 +1416,19 @@ type InlineKeyboardMarkup struct {
 type InlineKeyboardButton struct {
 	Text         string `json:"text"`
 	CallbackData string `json:"callback_data"`
+}
+
+type ReplyKeyboardMarkup struct {
+	Keyboard              [][]KeyboardButton `json:"keyboard"`
+	ResizeKeyboard        bool               `json:"resize_keyboard,omitempty"`
+	IsPersistent          bool               `json:"is_persistent,omitempty"`
+	InputFieldPlaceholder string             `json:"input_field_placeholder,omitempty"`
+}
+
+type KeyboardButton struct {
+	Text string `json:"text"`
+}
+
+type ReplyKeyboardRemove struct {
+	RemoveKeyboard bool `json:"remove_keyboard"`
 }
