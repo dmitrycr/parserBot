@@ -362,6 +362,9 @@ func (b *Bot) sendMainMenu(ctx context.Context, chatID int64, admin bool) error 
 			{Text: "🔄 Синхронизация", CallbackData: "menu:sync"},
 		})
 	}
+	rows = append(rows, []InlineKeyboardButton{
+		{Text: replyHideButton, CallbackData: "menu:hide_reply_menu"},
+	})
 
 	return b.api.sendMessage(ctx, chatID, "💻 Выберите раздел", &InlineKeyboardMarkup{InlineKeyboard: rows})
 }
@@ -372,6 +375,8 @@ func (b *Bot) handleMenuCallback(ctx context.Context, chatID int64, userID int64
 		return b.sendMainMenu(ctx, chatID, admin)
 	case "show_reply_menu":
 		return b.sendMainMenu(ctx, chatID, admin)
+	case "hide_reply_menu":
+		return b.hideReplyMenu(ctx, chatID)
 	case "status":
 		return b.sendStatus(ctx, chatID)
 	case "chats":
