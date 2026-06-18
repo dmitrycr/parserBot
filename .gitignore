@@ -23,3 +23,8 @@ Thumbs.db:encryptable
 *.njsproj
 *.pyproj
 *.local
+.env
+bin/
+
+# data
+data/
