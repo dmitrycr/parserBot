@@ -7,6 +7,7 @@ GO_VERSION="${GO_VERSION:-1.25.1}"
 SERVICE_NAME="${SERVICE_NAME:-parser-tgchat-bot}"
 BOT_BIN="$APP_DIR/bin/bot"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+SKIP_BUILD="${SKIP_BUILD:-0}"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "This installer is intended for Linux servers."
@@ -68,21 +69,35 @@ install_go() {
 
 echo "Installing system packages."
 $SUDO apt-get update
-$SUDO apt-get install -y ca-certificates curl git tar build-essential
+$SUDO apt-get install -y ca-certificates curl git tar
 
-install_go
-export PATH="/usr/local/go/bin:$PATH"
-require_cmd go
+if [[ "$SKIP_BUILD" == "1" ]]; then
+  if [[ ! -x "$BOT_BIN" ]]; then
+    echo "SKIP_BUILD=1 was set, but executable bot binary was not found: $BOT_BIN"
+    echo "Build it locally and upload it to $BOT_BIN first."
+    exit 1
+  fi
+  echo "Skipping Go installation and build because SKIP_BUILD=1."
+else
+  $SUDO apt-get install -y build-essential
+
+  install_go
+  export PATH="/usr/local/go/bin:$PATH"
+  require_cmd go
+fi
 
 echo "Preparing project directories."
 mkdir -p "$APP_DIR/bin" "$APP_DIR/data"
 
-echo "Downloading Go modules."
 cd "$APP_DIR"
-go mod download
 
-echo "Building bot binary."
-go build -o "$BOT_BIN" ./cmd/bot
+if [[ "$SKIP_BUILD" != "1" ]]; then
+  echo "Downloading Go modules."
+  go mod download
+
+  echo "Building bot binary."
+  GOMAXPROCS="${GOMAXPROCS:-1}" go build -p="${GO_BUILD_P:-1}" -o "$BOT_BIN" ./cmd/bot
+fi
 
 echo "Installing systemd service: $SERVICE_NAME."
 $SUDO tee "$SERVICE_FILE" >/dev/null <<EOF
