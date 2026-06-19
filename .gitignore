@@ -24,7 +24,7 @@ Thumbs.db:encryptable
 *.pyproj
 *.local
 .env
-bin/
+#bin/
 
 # data
 data/
