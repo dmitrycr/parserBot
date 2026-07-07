@@ -145,6 +145,12 @@ func (b *Bot) handleMessage(ctx context.Context, message Message) error {
 		return b.addKeyword(ctx, message.Chat.ID, args)
 	case "/remove_keyword":
 		return b.removeKeyword(ctx, message.Chat.ID, args)
+	case "/exclude_keywords":
+		return b.sendExcludeKeywords(ctx, message.Chat.ID)
+	case "/add_exclude_keyword":
+		return b.addExcludeKeyword(ctx, message.Chat.ID, args)
+	case "/remove_exclude_keyword":
+		return b.removeExcludeKeyword(ctx, message.Chat.ID, args)
 	case "/parse_now":
 		return b.parseNow(ctx, message.Chat.ID)
 	case "/start_parser":
@@ -273,6 +279,12 @@ func (b *Bot) handleCallback(ctx context.Context, query CallbackQuery) error {
 		}
 		return b.handleKeywordCallback(ctx, query.Message.Chat.ID, query.From.ID, strings.TrimPrefix(query.Data, "kw:"))
 	}
+	if strings.HasPrefix(query.Data, "exkw:") {
+		if query.Message == nil {
+			return nil
+		}
+		return b.handleExcludeKeywordCallback(ctx, query.Message.Chat.ID, query.From.ID, strings.TrimPrefix(query.Data, "exkw:"))
+	}
 	if strings.HasPrefix(query.Data, "folder:") {
 		if query.Message == nil {
 			return nil
@@ -324,6 +336,9 @@ func (b *Bot) sendHelp(ctx context.Context, chatID int64, admin bool) error {
 		"/keywords - ключевые слова",
 		"/add_keyword <слово> - добавить ключ",
 		"/remove_keyword <слово> - удалить ключ",
+		"/exclude_keywords - слова исключения",
+		"/add_exclude_keyword <слово> - добавить исключение",
+		"/remove_exclude_keyword <слово> - удалить исключение",
 		"/parse_now - запустить парсинг сейчас",
 		"/start_parser - включить автопарсинг",
 		"/stop_parser - выключить автопарсинг",
@@ -658,6 +673,34 @@ func (b *Bot) sendKeywordsMenu(ctx context.Context, chatID int64) error {
 			{Text: "➕ Добавить", CallbackData: "kw:add"},
 			{Text: "🗑 Удалить", CallbackData: "kw:remove"},
 		},
+		{
+			{Text: "🚫 Слова исключения", CallbackData: "exkw:list"},
+		},
+	}
+	rows = append(rows, navRows()...)
+
+	return b.api.sendMessage(ctx, chatID, text, &InlineKeyboardMarkup{InlineKeyboard: rows})
+}
+
+func (b *Bot) sendExcludeKeywordsMenu(ctx context.Context, chatID int64) error {
+	keywords, err := b.app.ExcludeKeywords(ctx)
+	if err != nil {
+		return err
+	}
+
+	text := "🚫 Слова исключения"
+	if len(keywords) > 0 {
+		text += "\n\n" + strings.Join(keywords, "\n")
+	}
+
+	rows := [][]InlineKeyboardButton{
+		{
+			{Text: "➕ Добавить", CallbackData: "exkw:add"},
+			{Text: "🗑 Удалить", CallbackData: "exkw:remove"},
+		},
+		{
+			{Text: "🔎 Ключевые", CallbackData: "menu:keywords"},
+		},
 	}
 	rows = append(rows, navRows()...)
 
@@ -674,6 +717,19 @@ func (b *Bot) handleKeywordCallback(ctx context.Context, chatID int64, userID in
 		return b.api.sendMessage(ctx, chatID, "Отправь ключевое слово для удаления.", cancelNav())
 	default:
 		return b.sendKeywordsMenu(ctx, chatID)
+	}
+}
+
+func (b *Bot) handleExcludeKeywordCallback(ctx context.Context, chatID int64, userID int64, action string) error {
+	switch action {
+	case "add":
+		b.states[userID] = "add_exclude_keyword"
+		return b.api.sendMessage(ctx, chatID, "Отправь слово исключения следующим сообщением.", cancelExcludeNav())
+	case "remove":
+		b.states[userID] = "remove_exclude_keyword"
+		return b.api.sendMessage(ctx, chatID, "Отправь слово исключения для удаления.", cancelExcludeNav())
+	default:
+		return b.sendExcludeKeywordsMenu(ctx, chatID)
 	}
 }
 
@@ -695,6 +751,16 @@ func (b *Bot) handleStateMessage(ctx context.Context, chatID int64, userID int64
 			return true, err
 		}
 		return true, b.sendKeywordsMenu(ctx, chatID)
+	case "add_exclude_keyword":
+		if err := b.addExcludeKeyword(ctx, chatID, text); err != nil {
+			return true, err
+		}
+		return true, b.sendExcludeKeywordsMenu(ctx, chatID)
+	case "remove_exclude_keyword":
+		if err := b.removeExcludeKeyword(ctx, chatID, text); err != nil {
+			return true, err
+		}
+		return true, b.sendExcludeKeywordsMenu(ctx, chatID)
 	default:
 		return false, nil
 	}
@@ -747,6 +813,10 @@ func (b *Bot) sendStatus(ctx context.Context, chatID int64) error {
 	if err != nil {
 		return err
 	}
+	excludeKeywords, err := b.app.ExcludeKeywords(ctx)
+	if err != nil {
+		return err
+	}
 
 	var enabled int
 	for _, chat := range chats {
@@ -756,10 +826,11 @@ func (b *Bot) sendStatus(ctx context.Context, chatID int64) error {
 	}
 
 	return b.api.sendMessage(ctx, chatID, fmt.Sprintf(
-		"Чатов всего: %d\nВключено: %d\nКлючевых слов: %d\nАвтопарсинг: %s\nИнтервал: %s",
+		"Чатов всего: %d\nВключено: %d\nКлючевых слов: %d\nСлов исключения: %d\nАвтопарсинг: %s\nИнтервал: %s",
 		len(chats),
 		enabled,
 		len(keywords),
+		len(excludeKeywords),
 		b.autoParseStatus(),
 		b.autoParseInterval,
 	), mainNav())
@@ -859,6 +930,42 @@ func (b *Bot) removeKeyword(ctx context.Context, chatID int64, args string) erro
 	}
 
 	return b.api.sendMessage(ctx, chatID, "Ключевое слово удалено.", nil)
+}
+
+func (b *Bot) sendExcludeKeywords(ctx context.Context, chatID int64) error {
+	keywords, err := b.app.ExcludeKeywords(ctx)
+	if err != nil {
+		return err
+	}
+	if len(keywords) == 0 {
+		return b.api.sendMessage(ctx, chatID, "Слов исключения пока нет.", nil)
+	}
+
+	return b.api.sendMessage(ctx, chatID, strings.Join(keywords, "\n"), nil)
+}
+
+func (b *Bot) addExcludeKeyword(ctx context.Context, chatID int64, args string) error {
+	added, err := b.app.AddExcludeKeyword(ctx, args)
+	if err != nil {
+		return err
+	}
+	if !added {
+		return b.api.sendMessage(ctx, chatID, "Слово исключения уже есть или пустое.", nil)
+	}
+
+	return b.api.sendMessage(ctx, chatID, "Слово исключения добавлено.", nil)
+}
+
+func (b *Bot) removeExcludeKeyword(ctx context.Context, chatID int64, args string) error {
+	removed, err := b.app.RemoveExcludeKeyword(ctx, args)
+	if err != nil {
+		return err
+	}
+	if !removed {
+		return b.api.sendMessage(ctx, chatID, "Слово исключения не найдено.", nil)
+	}
+
+	return b.api.sendMessage(ctx, chatID, "Слово исключения удалено.", nil)
 }
 
 func (b *Bot) syncChats(ctx context.Context, chatID int64) error {
@@ -1246,6 +1353,17 @@ func cancelNav() *InlineKeyboardMarkup {
 			{
 				{Text: "🏠 Главное", CallbackData: "menu:home"},
 				{Text: "🔎 Ключевые", CallbackData: "menu:keywords"},
+			},
+		},
+	}
+}
+
+func cancelExcludeNav() *InlineKeyboardMarkup {
+	return &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{
+				{Text: "🏠 Главное", CallbackData: "menu:home"},
+				{Text: "🚫 Исключения", CallbackData: "exkw:list"},
 			},
 		},
 	}

@@ -149,6 +149,7 @@ type parseOptions struct {
 	checkpointsPath string
 	matchesPath     string
 	keywords        string
+	excludeKeywords string
 	limit           int
 }
 
@@ -225,6 +226,7 @@ func showHistory(ctx context.Context, client *tgclient.Client, args []string) er
 	accessHash := fs.Int64("access-hash", 0, "peer access hash from list-chats")
 	limit := fs.Int("limit", 20, "messages limit")
 	keywords := fs.String("keywords", os.Getenv("KEYWORDS"), "comma-separated keywords")
+	excludeKeywords := fs.String("exclude-keywords", os.Getenv("EXCLUDE_KEYWORDS"), "comma-separated exclude keywords")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -246,7 +248,7 @@ func showHistory(ctx context.Context, client *tgclient.Client, args []string) er
 		return err
 	}
 
-	matcher := msgparser.NewMatcher(splitKeywords(*keywords))
+	matcher := msgparser.NewMatcherWithExcludes(splitKeywords(*keywords), splitKeywords(*excludeKeywords))
 	if matcher.Empty() {
 		printMessages(messages)
 		return nil
@@ -266,15 +268,17 @@ func reparseChats(ctx context.Context, client *tgclient.Client, args []string) e
 	checkpointsPath := fs.String("checkpoints", envOrDefault("CHECKPOINTS_PATH", "data/checkpoints.json"), "checkpoints path")
 	matchesPath := fs.String("matches", envOrDefault("MATCHES_PATH", "data/matches.jsonl"), "matches jsonl path")
 	keywordsPath := fs.String("keywords-path", envOrDefault("KEYWORDS_PATH", "data/keywords.json"), "keywords path")
+	excludeKeywordsPath := fs.String("exclude-keywords-path", envOrDefault("EXCLUDE_KEYWORDS_PATH", "data/exclude_keywords.json"), "exclude keywords path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	service := app.NewService(client, app.Config{
-		ChatsPath:       *chatsPath,
-		CheckpointsPath: *checkpointsPath,
-		MatchesPath:     *matchesPath,
-		KeywordsPath:    *keywordsPath,
+		ChatsPath:           *chatsPath,
+		CheckpointsPath:     *checkpointsPath,
+		MatchesPath:         *matchesPath,
+		KeywordsPath:        *keywordsPath,
+		ExcludeKeywordsPath: *excludeKeywordsPath,
 	})
 
 	if *peerType == "" || *id == 0 {
@@ -302,6 +306,7 @@ func resetCheckpoint(ctx context.Context, client *tgclient.Client, args []string
 	checkpointsPath := fs.String("checkpoints", envOrDefault("CHECKPOINTS_PATH", "data/checkpoints.json"), "checkpoints path")
 	matchesPath := fs.String("matches", envOrDefault("MATCHES_PATH", "data/matches.jsonl"), "matches jsonl path")
 	keywordsPath := fs.String("keywords-path", envOrDefault("KEYWORDS_PATH", "data/keywords.json"), "keywords path")
+	excludeKeywordsPath := fs.String("exclude-keywords-path", envOrDefault("EXCLUDE_KEYWORDS_PATH", "data/exclude_keywords.json"), "exclude keywords path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -310,10 +315,11 @@ func resetCheckpoint(ctx context.Context, client *tgclient.Client, args []string
 	}
 
 	service := app.NewService(client, app.Config{
-		ChatsPath:       *chatsPath,
-		CheckpointsPath: *checkpointsPath,
-		MatchesPath:     *matchesPath,
-		KeywordsPath:    *keywordsPath,
+		ChatsPath:           *chatsPath,
+		CheckpointsPath:     *checkpointsPath,
+		MatchesPath:         *matchesPath,
+		KeywordsPath:        *keywordsPath,
+		ExcludeKeywordsPath: *excludeKeywordsPath,
 	})
 
 	chat, err := service.ResetCheckpoint(ctx, strings.ToLower(*peerType), *id)
@@ -340,6 +346,7 @@ func watchChats(ctx context.Context, client *tgclient.Client, args []string) err
 	checkpointsPath := fs.String("checkpoints", envOrDefault("CHECKPOINTS_PATH", "data/checkpoints.json"), "checkpoints path")
 	matchesPath := fs.String("matches", envOrDefault("MATCHES_PATH", "data/matches.jsonl"), "matches jsonl path")
 	keywords := fs.String("keywords", os.Getenv("KEYWORDS"), "comma-separated keywords")
+	excludeKeywords := fs.String("exclude-keywords", os.Getenv("EXCLUDE_KEYWORDS"), "comma-separated exclude keywords")
 	limit := fs.Int("limit", envInt("PARSE_LIMIT", 100), "messages limit per chat")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -358,6 +365,7 @@ func watchChats(ctx context.Context, client *tgclient.Client, args []string) err
 		checkpointsPath: *checkpointsPath,
 		matchesPath:     *matchesPath,
 		keywords:        *keywords,
+		excludeKeywords: *excludeKeywords,
 		limit:           *limit,
 	}
 
@@ -383,6 +391,7 @@ func parseParseOptions(name string, args []string) (parseOptions, error) {
 	checkpointsPath := fs.String("checkpoints", envOrDefault("CHECKPOINTS_PATH", "data/checkpoints.json"), "checkpoints path")
 	matchesPath := fs.String("matches", envOrDefault("MATCHES_PATH", "data/matches.jsonl"), "matches jsonl path")
 	keywords := fs.String("keywords", os.Getenv("KEYWORDS"), "comma-separated keywords")
+	excludeKeywords := fs.String("exclude-keywords", os.Getenv("EXCLUDE_KEYWORDS"), "comma-separated exclude keywords")
 	limit := fs.Int("limit", envInt("PARSE_LIMIT", 100), "messages limit per chat")
 	if err := fs.Parse(args); err != nil {
 		return parseOptions{}, err
@@ -393,12 +402,13 @@ func parseParseOptions(name string, args []string) (parseOptions, error) {
 		checkpointsPath: *checkpointsPath,
 		matchesPath:     *matchesPath,
 		keywords:        *keywords,
+		excludeKeywords: *excludeKeywords,
 		limit:           *limit,
 	}, nil
 }
 
 func runParse(ctx context.Context, client *tgclient.Client, options parseOptions) error {
-	matcher := msgparser.NewMatcher(splitKeywords(options.keywords))
+	matcher := msgparser.NewMatcherWithExcludes(splitKeywords(options.keywords), splitKeywords(options.excludeKeywords))
 	if matcher.Empty() {
 		return fmt.Errorf("KEYWORDS or --keywords is required")
 	}
