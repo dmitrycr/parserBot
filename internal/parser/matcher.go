@@ -10,10 +10,15 @@ type Match struct {
 }
 
 type Matcher struct {
-	keywords []string
+	keywords        []string
+	excludeKeywords []string
 }
 
 func NewMatcher(keywords []string) Matcher {
+	return NewMatcherWithExcludes(keywords, nil)
+}
+
+func NewMatcherWithExcludes(keywords []string, excludeKeywords []string) Matcher {
 	normalized := make([]string, 0, len(keywords))
 	for _, keyword := range keywords {
 		keyword = normalize(keyword)
@@ -23,7 +28,16 @@ func NewMatcher(keywords []string) Matcher {
 		normalized = append(normalized, keyword)
 	}
 
-	return Matcher{keywords: normalized}
+	normalizedExcludes := make([]string, 0, len(excludeKeywords))
+	for _, keyword := range excludeKeywords {
+		keyword = normalize(keyword)
+		if keyword == "" {
+			continue
+		}
+		normalizedExcludes = append(normalizedExcludes, keyword)
+	}
+
+	return Matcher{keywords: normalized, excludeKeywords: normalizedExcludes}
 }
 
 func (m Matcher) Empty() bool {
@@ -38,11 +52,24 @@ func (m Matcher) Match(text string) (Match, bool) {
 
 	for _, keyword := range m.keywords {
 		if strings.Contains(text, keyword) {
+			if m.excluded(text) {
+				return Match{}, false
+			}
 			return Match{Keyword: keyword}, true
 		}
 	}
 
 	return Match{}, false
+}
+
+func (m Matcher) excluded(text string) bool {
+	for _, keyword := range m.excludeKeywords {
+		if strings.Contains(text, keyword) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func normalize(value string) string {

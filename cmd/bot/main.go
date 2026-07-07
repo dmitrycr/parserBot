@@ -66,10 +66,11 @@ func run() error {
 	client := tgclient.NewClient(apiID, apiHash, sessionPath)
 	runBot := func(ctx context.Context, client *tgclient.Client) error {
 		service := app.NewService(client, app.Config{
-			ChatsPath:       envOrDefault("CHATS_PATH", "data/chats.json"),
-			CheckpointsPath: envOrDefault("CHECKPOINTS_PATH", "data/checkpoints.json"),
-			MatchesPath:     envOrDefault("MATCHES_PATH", "data/matches.jsonl"),
-			KeywordsPath:    envOrDefault("KEYWORDS_PATH", "data/keywords.json"),
+			ChatsPath:           envOrDefault("CHATS_PATH", "data/chats.json"),
+			CheckpointsPath:     envOrDefault("CHECKPOINTS_PATH", "data/checkpoints.json"),
+			MatchesPath:         envOrDefault("MATCHES_PATH", "data/matches.jsonl"),
+			KeywordsPath:        envOrDefault("KEYWORDS_PATH", "data/keywords.json"),
+			ExcludeKeywordsPath: envOrDefault("EXCLUDE_KEYWORDS_PATH", "data/exclude_keywords.json"),
 		})
 
 		bot := tgbot.New(tgbot.Config{

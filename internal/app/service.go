@@ -14,16 +14,18 @@ import (
 )
 
 type Config struct {
-	ChatsPath       string
-	CheckpointsPath string
-	MatchesPath     string
-	KeywordsPath    string
+	ChatsPath           string
+	CheckpointsPath     string
+	MatchesPath         string
+	KeywordsPath        string
+	ExcludeKeywordsPath string
 }
 
 type Service struct {
-	tg       *telegram.Client
-	files    storage.FileStore
-	keywords storage.KeywordStore
+	tg              *telegram.Client
+	files           storage.FileStore
+	keywords        storage.KeywordStore
+	excludeKeywords storage.KeywordStore
 }
 
 type ParseOptions struct {
@@ -37,10 +39,15 @@ type ParseSummary struct {
 }
 
 func NewService(tg *telegram.Client, config Config) Service {
+	if config.ExcludeKeywordsPath == "" {
+		config.ExcludeKeywordsPath = "data/exclude_keywords.json"
+	}
+
 	return Service{
-		tg:       tg,
-		files:    storage.NewFileStore(config.ChatsPath, config.CheckpointsPath, config.MatchesPath),
-		keywords: storage.NewKeywordStore(config.KeywordsPath),
+		tg:              tg,
+		files:           storage.NewFileStore(config.ChatsPath, config.CheckpointsPath, config.MatchesPath),
+		keywords:        storage.NewKeywordStore(config.KeywordsPath),
+		excludeKeywords: storage.NewKeywordStore(config.ExcludeKeywordsPath),
 	}
 }
 
@@ -193,15 +200,22 @@ func (s Service) RemoveKeyword(ctx context.Context, keyword string) (bool, error
 	return s.keywords.Remove(ctx, keyword)
 }
 
-func (s Service) ParseOnce(ctx context.Context, options ParseOptions, onMatch func(context.Context, storage.Match) error) (ParseSummary, error) {
-	keywords, err := s.keywords.Load(ctx)
-	if err != nil {
-		return ParseSummary{}, fmt.Errorf("load keywords: %w", err)
-	}
+func (s Service) ExcludeKeywords(ctx context.Context) ([]string, error) {
+	return s.excludeKeywords.Load(ctx)
+}
 
-	matcher := msgparser.NewMatcher(keywords)
-	if matcher.Empty() {
-		return ParseSummary{}, fmt.Errorf("keywords list is empty")
+func (s Service) AddExcludeKeyword(ctx context.Context, keyword string) (bool, error) {
+	return s.excludeKeywords.Add(ctx, keyword)
+}
+
+func (s Service) RemoveExcludeKeyword(ctx context.Context, keyword string) (bool, error) {
+	return s.excludeKeywords.Remove(ctx, keyword)
+}
+
+func (s Service) ParseOnce(ctx context.Context, options ParseOptions, onMatch func(context.Context, storage.Match) error) (ParseSummary, error) {
+	matcher, err := s.matcher(ctx)
+	if err != nil {
+		return ParseSummary{}, err
 	}
 
 	chats, err := s.files.LoadChats(ctx)
@@ -243,14 +257,9 @@ func (s Service) ParseOnce(ctx context.Context, options ParseOptions, onMatch fu
 }
 
 func (s Service) ReparseEnabled(ctx context.Context, options ParseOptions, onMatch func(context.Context, storage.Match) error) (ParseSummary, error) {
-	keywords, err := s.keywords.Load(ctx)
+	matcher, err := s.matcher(ctx)
 	if err != nil {
-		return ParseSummary{}, fmt.Errorf("load keywords: %w", err)
-	}
-
-	matcher := msgparser.NewMatcher(keywords)
-	if matcher.Empty() {
-		return ParseSummary{}, fmt.Errorf("keywords list is empty")
+		return ParseSummary{}, err
 	}
 
 	chats, err := s.files.LoadChats(ctx)
@@ -278,14 +287,9 @@ func (s Service) ReparseEnabled(ctx context.Context, options ParseOptions, onMat
 }
 
 func (s Service) ReparseChat(ctx context.Context, chatType string, id int64, options ParseOptions, onMatch func(context.Context, storage.Match) error) (ParseSummary, error) {
-	keywords, err := s.keywords.Load(ctx)
+	matcher, err := s.matcher(ctx)
 	if err != nil {
-		return ParseSummary{}, fmt.Errorf("load keywords: %w", err)
-	}
-
-	matcher := msgparser.NewMatcher(keywords)
-	if matcher.Empty() {
-		return ParseSummary{}, fmt.Errorf("keywords list is empty")
+		return ParseSummary{}, err
 	}
 
 	chat, err := s.FindChat(ctx, chatType, id)
@@ -302,6 +306,25 @@ func (s Service) ReparseChat(ctx context.Context, chatType string, id int64, opt
 	summary.Matches = matches
 
 	return summary, nil
+}
+
+func (s Service) matcher(ctx context.Context) (msgparser.Matcher, error) {
+	keywords, err := s.keywords.Load(ctx)
+	if err != nil {
+		return msgparser.Matcher{}, fmt.Errorf("load keywords: %w", err)
+	}
+
+	excludeKeywords, err := s.excludeKeywords.Load(ctx)
+	if err != nil {
+		return msgparser.Matcher{}, fmt.Errorf("load exclude keywords: %w", err)
+	}
+
+	matcher := msgparser.NewMatcherWithExcludes(keywords, excludeKeywords)
+	if matcher.Empty() {
+		return msgparser.Matcher{}, fmt.Errorf("keywords list is empty")
+	}
+
+	return matcher, nil
 }
 
 func (s Service) parseChat(
