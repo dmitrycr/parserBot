@@ -6,14 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"parserTgChat/internal/app"
 	"parserTgChat/internal/storage"
@@ -1117,9 +1120,14 @@ func (b *Bot) notifyMatch(ctx context.Context, match storage.Match) error {
 		return err
 	}
 
-	text := formatMatch(match)
+	keywords, err := b.app.Keywords(ctx)
+	if err != nil {
+		return err
+	}
+
+	text := formatMatchHTML(match, keywords)
 	for _, user := range users {
-		if err := b.api.sendMessage(ctx, user.TelegramID, text, nil); err != nil {
+		if err := b.api.sendHTMLMessage(ctx, user.TelegramID, text, nil); err != nil {
 			log.Printf("send match failed user_id=%d err=%v", user.TelegramID, err)
 		}
 	}
@@ -1325,6 +1333,238 @@ func formatMatch(match storage.Match) string {
 	return text
 }
 
+func formatMatchHTML(match storage.Match, keywords []string) string {
+	text := fmt.Sprintf(
+		"Найдено: %s\nЧат: %s (%s:%d)\nДата: %s\n\n%s",
+		html.EscapeString(match.Keyword),
+		html.EscapeString(match.ChatTitle),
+		html.EscapeString(match.ChatType),
+		match.ChatID,
+		match.Date.Format("2006-01-02 15:04:05"),
+		highlightKeywordsHTML(truncate(match.Text, 3000), keywords),
+	)
+	if match.ChatUsername != "" {
+		text += fmt.Sprintf("\n\nhttps://t.me/%s/%d", html.EscapeString(match.ChatUsername), match.MessageID)
+	}
+
+	return text
+}
+
+func highlightKeywordsHTML(text string, keywords []string) string {
+	ranges := keywordRanges(text, keywords)
+	if len(ranges) == 0 {
+		return html.EscapeString(text)
+	}
+
+	var builder strings.Builder
+	last := 0
+	for _, current := range ranges {
+		if current.start > last {
+			builder.WriteString(html.EscapeString(text[last:current.start]))
+		}
+		builder.WriteString("<b>")
+		builder.WriteString(html.EscapeString(strings.ToUpper(text[current.start:current.end])))
+		builder.WriteString("</b>")
+		last = current.end
+	}
+	if last < len(text) {
+		builder.WriteString(html.EscapeString(text[last:]))
+	}
+
+	return builder.String()
+}
+
+type textRange struct {
+	start int
+	end   int
+}
+
+func keywordRanges(text string, keywords []string) []textRange {
+	normalizedText, byteMap := normalizeRunesWithByteMap(text)
+	if len(normalizedText) == 0 {
+		return nil
+	}
+
+	normalizedKeywords := make([][]rune, 0, len(keywords))
+	seen := map[string]struct{}{}
+	for _, keyword := range keywords {
+		normalized := normalizeRunes(keyword)
+		if len(normalized) == 0 {
+			continue
+		}
+		key := string(normalized)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalizedKeywords = append(normalizedKeywords, normalized)
+	}
+	sort.Slice(normalizedKeywords, func(i int, j int) bool {
+		return len(normalizedKeywords[i]) > len(normalizedKeywords[j])
+	})
+
+	var found []textRange
+	for _, keyword := range normalizedKeywords {
+		for start := 0; start <= len(normalizedText)-len(keyword); start++ {
+			if !runesEqual(normalizedText[start:start+len(keyword)], keyword) {
+				continue
+			}
+			end := start + len(keyword)
+			found = append(found, expandRangeToWord(text, textRange{
+				start: byteMap[start],
+				end:   originalEndOffset(text, byteMap, end),
+			}))
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+
+	sort.Slice(found, func(i int, j int) bool {
+		if found[i].start == found[j].start {
+			return found[i].end > found[j].end
+		}
+		return found[i].start < found[j].start
+	})
+
+	selected := make([]textRange, 0, len(found))
+	lastEnd := -1
+	for _, current := range found {
+		if current.start < lastEnd {
+			continue
+		}
+		selected = append(selected, current)
+		lastEnd = current.end
+	}
+
+	return selected
+}
+
+func expandRangeToWord(text string, current textRange) textRange {
+	current.start = expandStartToWord(text, current.start)
+	current.end = expandEndToWord(text, current.end)
+	return current
+}
+
+func expandStartToWord(text string, start int) int {
+	for start > 0 {
+		var previousStart int
+		var previousEnd int
+		var previousRune rune
+		found := false
+		for index, r := range text {
+			end := index + len(string(r))
+			if end == start {
+				previousStart = index
+				previousEnd = end
+				previousRune = r
+				found = true
+				break
+			}
+			if end > start {
+				break
+			}
+		}
+		if !found || previousEnd != start || !isWordRune(previousRune) {
+			return start
+		}
+		start = previousStart
+	}
+
+	return start
+}
+
+func expandEndToWord(text string, end int) int {
+	for end < len(text) {
+		var nextEnd int
+		var nextRune rune
+		found := false
+		for index, r := range text {
+			if index == end {
+				nextEnd = index + len(string(r))
+				nextRune = r
+				found = true
+				break
+			}
+			if index > end {
+				break
+			}
+		}
+		if !found || !isWordRune(nextRune) {
+			return end
+		}
+		end = nextEnd
+	}
+
+	return end
+}
+
+func isWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+func normalizeRunes(value string) []rune {
+	normalized, _ := normalizeRunesWithByteMap(value)
+	return normalized
+}
+
+func normalizeRunesWithByteMap(value string) ([]rune, []int) {
+	runes := make([]rune, 0, len(value))
+	byteMap := make([]int, 0, len(value))
+	previousSpace := false
+
+	for index, r := range value {
+		r = unicode.ToLower(r)
+		if r == 'ё' {
+			r = 'е'
+		}
+		if unicode.IsSpace(r) {
+			if previousSpace {
+				continue
+			}
+			runes = append(runes, ' ')
+			byteMap = append(byteMap, index)
+			previousSpace = true
+			continue
+		}
+		runes = append(runes, r)
+		byteMap = append(byteMap, index)
+		previousSpace = false
+	}
+
+	for len(runes) > 0 && runes[0] == ' ' {
+		runes = runes[1:]
+		byteMap = byteMap[1:]
+	}
+	for len(runes) > 0 && runes[len(runes)-1] == ' ' {
+		runes = runes[:len(runes)-1]
+		byteMap = byteMap[:len(byteMap)-1]
+	}
+
+	return runes, byteMap
+}
+
+func originalEndOffset(text string, byteMap []int, normalizedEnd int) int {
+	if normalizedEnd >= len(byteMap) {
+		return len(text)
+	}
+
+	return byteMap[normalizedEnd]
+}
+
+func runesEqual(left []rune, right []rune) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
 func truncate(value string, limit int) string {
 	if len([]rune(value)) <= limit {
 		return value
@@ -1472,9 +1712,20 @@ func (c *apiClient) getUpdates(ctx context.Context, offset int, timeout int) ([]
 }
 
 func (c *apiClient) sendMessage(ctx context.Context, chatID int64, text string, markup any) error {
+	return c.sendMessageWithParseMode(ctx, chatID, text, "", markup)
+}
+
+func (c *apiClient) sendHTMLMessage(ctx context.Context, chatID int64, text string, markup any) error {
+	return c.sendMessageWithParseMode(ctx, chatID, text, "HTML", markup)
+}
+
+func (c *apiClient) sendMessageWithParseMode(ctx context.Context, chatID int64, text string, parseMode string, markup any) error {
 	request := SendMessageRequest{
 		ChatID: chatID,
 		Text:   truncate(text, 3900),
+	}
+	if parseMode != "" {
+		request.ParseMode = parseMode
 	}
 	if markup != nil {
 		request.ReplyMarkup = markup
@@ -1596,6 +1847,7 @@ type Chat struct {
 type SendMessageRequest struct {
 	ChatID      int64  `json:"chat_id"`
 	Text        string `json:"text"`
+	ParseMode   string `json:"parse_mode,omitempty"`
 	ReplyMarkup any    `json:"reply_markup,omitempty"`
 }
 
